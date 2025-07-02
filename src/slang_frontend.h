@@ -28,6 +28,7 @@ namespace slang {
 		class Compilation;
 		class Symbol;
 		class Expression;
+		class AssertionExpr;
 		class SubroutineSymbol;
 		class InstanceSymbol;
 		class InstanceBodySymbol;
@@ -137,6 +138,7 @@ struct EvalContext {
 
 	// Evaluates the given symbols/expressions to their value in this context
 	RTLIL::SigSpec operator()(ast::Expression const &expr);
+	RTLIL::SigSpec operator()(ast::AssertionExpr const &expr);
 	RTLIL::SigSpec operator()(ast::Symbol const &symbol);
 
 	// Evaluates the given expression, inserts an extra sign bit if need

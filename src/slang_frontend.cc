@@ -489,6 +489,7 @@ public:
 	ProceduralContext &context;
 	EvalContext &eval;
 	UnrollLimitTracking &unroll_limit;
+	std::optional<std::string_view> next_assert_name;
 
 	StatementVisitor(ProceduralContext &context)
 		: netlist(context.netlist), context(context), eval(context.eval), unroll_limit(context.unroll_limit) {}
@@ -638,7 +639,17 @@ public:
 	{
 		if (netlist.settings.ignore_assertions.value_or(false))
 			return;
+		handleCheck(stmt, eval(stmt.cond));
+	}
 
+	void handle(const ast::ConcurrentAssertionStatement &stmt) {
+		if (netlist.settings.ignore_assertions.value_or(false))
+			return;
+		handleCheck(stmt, eval(stmt.propertySpec));
+	}
+
+	template<typename T>
+	void handleCheck(const T& stmt, Yosys::RTLIL::SigSpec value) {
 		std::string flavor;
 		switch (stmt.assertionKind) {
 		case ast::AssertionKind::Assert:
@@ -655,21 +666,25 @@ public:
 			return;
 		}
 
-		auto cell = netlist.canvas->addCell(netlist.new_id(), ID($check));
+		
+		Yosys::IdString name;
+		if (next_assert_name.has_value()) {
+			std::string str = "\\";
+			str += next_assert_name.value();
+			name = Yosys::IdString(str);
+			next_assert_name.reset();
+		} else {
+			name = netlist.new_id();
+		}
+		auto cell = netlist.canvas->addCell(name, ID($check));
 		context.set_effects_trigger(cell);
 		cell->setParam(ID::FLAVOR, flavor);
 		cell->setParam(ID::FORMAT, std::string(""));
 		cell->setParam(ID::ARGS_WIDTH, 0);
 		cell->setParam(ID::PRIORITY, --context.effects_priority);
 		cell->setPort(ID::ARGS, {});
-		cell->setPort(ID::A, netlist.ReduceBool(eval(stmt.cond)));
+		cell->setPort(ID::A, netlist.ReduceBool(value));
 		transfer_attrs(stmt, cell);
-	}
-
-	void handle(const ast::ConcurrentAssertionStatement &stmt) {
-		if (!netlist.settings.ignore_assertions.value_or(false)) {
-			netlist.add_diag(diag::SVAUnsupported, stmt.sourceRange);
-		}
 	}
 
 	RTLIL::SigSpec handle_call(const ast::CallExpression &call)
@@ -794,6 +809,7 @@ public:
 
 	void handle(const ast::BlockStatement &blk)
 	{
+		next_assert_name = blk.blockSymbol == NULL ? std::optional<std::string_view>() : std::optional(blk.blockSymbol->name);
 		require(blk, blk.blockKind == ast::StatementBlockKind::Sequential)
 		EnterAutomaticScopeGuard guard(context.eval, blk.blockSymbol);
 		blk.body.visit(*this);
@@ -1390,6 +1406,43 @@ RTLIL::SigSpec EvalContext::apply_nested_conversion(const ast::Expression &expr,
 		return apply_conversion(conv, value);
 	} else {
 		log_abort();
+	}
+}
+
+RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr)
+{
+	switch (expr.kind) {
+  case ast::AssertionExprKind::Invalid:
+  		log_abort();
+  case ast::AssertionExprKind::Simple:
+	  {
+  		auto& simple = expr.as<ast::SimpleAssertionExpr>();
+  		if (simple.isNullExpr) log_abort();
+  		if (simple.repetition.has_value()) log_abort();
+  		return (*this)(simple.expr);
+	  }
+  case ast::AssertionExprKind::SequenceConcat:
+  		log_abort();
+  case ast::AssertionExprKind::SequenceWithMatch:
+  		log_abort();
+  case ast::AssertionExprKind::Unary:
+  		log_abort();
+  case ast::AssertionExprKind::Binary:
+  		log_abort();
+  case ast::AssertionExprKind::FirstMatch:
+  		log_abort();
+  case ast::AssertionExprKind::Clocking:
+  		log_abort();
+  case ast::AssertionExprKind::StrongWeak:
+  		log_abort();
+  case ast::AssertionExprKind::Abort:
+  		log_abort();
+  case ast::AssertionExprKind::Conditional:
+  		log_abort();
+  case ast::AssertionExprKind::Case:
+  		log_abort();
+  case ast::AssertionExprKind::DisableIff:
+  		log_abort();
 	}
 }
 
