@@ -38,6 +38,7 @@ namespace slang {
 		class StreamingConcatenationExpression;
 		class ConversionExpression;
 		class AssignmentExpression;
+		class SequenceRange;
 	};
 };
 
@@ -119,6 +120,7 @@ private:
 struct EvalContext {
 	NetlistContext &netlist;
 	ProceduralContext *procedural;
+	const RTLIL::SigSpec *clk = nullptr;
 
 	ast::EvalContext const_;
 	const ast::Expression *lvalue = nullptr;
@@ -136,9 +138,11 @@ struct EvalContext {
 	VariableBits streaming_lhs(ast::StreamingConcatenationExpression const &expr);
 	RTLIL::SigSpec streaming(ast::StreamingConcatenationExpression const &expr);
 
+	RTLIL::SigSpec delay(RTLIL::SigSpec sig, ast::SequenceRange const &delay, const RTLIL::SigSpec* clk);
+
 	// Evaluates the given symbols/expressions to their value in this context
 	RTLIL::SigSpec operator()(ast::Expression const &expr);
-	RTLIL::SigSpec operator()(ast::AssertionExpr const &expr);
+	RTLIL::SigSpec operator()(ast::AssertionExpr const &expr, const RTLIL::SigSpec* clk);
 	RTLIL::SigSpec operator()(ast::Symbol const &symbol);
 
 	// Evaluates the given expression, inserts an extra sign bit if need

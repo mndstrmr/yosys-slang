@@ -489,7 +489,8 @@ public:
 	ProceduralContext &context;
 	EvalContext &eval;
 	UnrollLimitTracking &unroll_limit;
-	std::optional<std::string_view> next_assert_name;
+	const ast::Symbol *scope_symbol;
+	const RTLIL::SigSpec *default_clocking = nullptr;
 
 	StatementVisitor(ProceduralContext &context)
 		: netlist(context.netlist), context(context), eval(context.eval), unroll_limit(context.unroll_limit) {}
@@ -639,17 +640,31 @@ public:
 	{
 		if (netlist.settings.ignore_assertions.value_or(false))
 			return;
-		handleCheck(stmt, eval(stmt.cond));
+		auto cell = handle_check(stmt, eval(stmt.cond));
+		context.set_effects_trigger(cell);
 	}
 
 	void handle(const ast::ConcurrentAssertionStatement &stmt) {
 		if (netlist.settings.ignore_assertions.value_or(false))
 			return;
-		handleCheck(stmt, eval(stmt.propertySpec));
+
+		auto cell = handle_check(stmt, eval(stmt.propertySpec, default_clocking));
+		if (stmt.propertySpec.kind == ast::AssertionExprKind::Clocking) {
+			const auto& clocking = stmt.propertySpec.as<ast::ClockingAssertionExpr>();
+			if (clocking.clocking.kind == ast::TimingControlKind::SignalEvent) {
+				const auto& event = clocking.clocking.as<ast::SignalEventControl>();
+				cell->setParam(ID::TRG_ENABLE, 1);
+				cell->setParam(ID::TRG_WIDTH, 1);
+				cell->setParam(ID::TRG_POLARITY, RTLIL::Const(1, 1));
+				cell->setPort(ID::TRG, eval(event.expr));
+				cell->setPort(ID::EN, RTLIL::Const(1, 1));
+				return;
+			}
+		}
 	}
 
 	template<typename T>
-	void handleCheck(const T& stmt, Yosys::RTLIL::SigSpec value) {
+	RTLIL::Cell* handle_check(const T& stmt, Yosys::RTLIL::SigSpec value) {
 		std::string flavor;
 		switch (stmt.assertionKind) {
 		case ast::AssertionKind::Assert:
@@ -662,22 +677,18 @@ public:
 			flavor = "cover";
 			break;
 		default:
-			netlist.add_diag(diag::AssertionUnsupported, stmt.sourceRange);
-			return;
+			log_abort();
 		}
 
 		
-		Yosys::IdString name;
-		if (next_assert_name.has_value()) {
-			std::string str = "\\";
-			str += next_assert_name.value();
-			name = Yosys::IdString(str);
-			next_assert_name.reset();
-		} else {
+		std::string name;
+		if (scope_symbol) {
+			name = "\\";
+			name = netlist.new_id(name + scope_symbol->getHierarchicalPath());
+		} else
 			name = netlist.new_id();
-		}
+		
 		auto cell = netlist.canvas->addCell(name, ID($check));
-		context.set_effects_trigger(cell);
 		cell->setParam(ID::FLAVOR, flavor);
 		cell->setParam(ID::FORMAT, std::string(""));
 		cell->setParam(ID::ARGS_WIDTH, 0);
@@ -685,6 +696,7 @@ public:
 		cell->setPort(ID::ARGS, {});
 		cell->setPort(ID::A, netlist.ReduceBool(value));
 		transfer_attrs(stmt, cell);
+		return cell;
 	}
 
 	RTLIL::SigSpec handle_call(const ast::CallExpression &call)
@@ -809,10 +821,12 @@ public:
 
 	void handle(const ast::BlockStatement &blk)
 	{
-		next_assert_name = blk.blockSymbol == NULL ? std::optional<std::string_view>() : std::optional(blk.blockSymbol->name);
+		const ast::Symbol* old = scope_symbol;
+		scope_symbol = blk.blockSymbol;
 		require(blk, blk.blockKind == ast::StatementBlockKind::Sequential)
 		EnterAutomaticScopeGuard guard(context.eval, blk.blockSymbol);
 		blk.body.visit(*this);
+		scope_symbol = old;
 	}
 
 	void handle(const ast::StatementList &list)
@@ -1311,6 +1325,11 @@ RTLIL::SigSpec EvalContext::operator()(ast::Symbol const &symbol)
 			return convert_svint(exprconst.integer());
 		}
 		break;
+	case ast::SymbolKind::EnumValue:
+		{
+			auto &eval = symbol.as<ast::EnumValueSymbol>();
+			return convert_svint(eval.getValue().integer());
+		}
 	default:
 		ast_unreachable(symbol);
 	}
@@ -1409,30 +1428,102 @@ RTLIL::SigSpec EvalContext::apply_nested_conversion(const ast::Expression &expr,
 	}
 }
 
-RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr)
+RTLIL::SigSpec EvalContext::delay(RTLIL::SigSpec sig, const slang::ast::SequenceRange &seq, const RTLIL::SigSpec* clk)
+{
+	if (seq.min == 0 && seq.max == 0) return sig;
+	log("Delay: %d - %d\n", seq.min, seq.max.has_value() ? seq.max.value() : -1);
+	log_abort();
+	// if (seq.min != seq.max) log_abort();
+
+	// return netlist
+}
+
+RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTLIL::SigSpec* clk)
 {
 	switch (expr.kind) {
   case ast::AssertionExprKind::Invalid:
   		log_abort();
   case ast::AssertionExprKind::Simple:
 	  {
-  		auto& simple = expr.as<ast::SimpleAssertionExpr>();
-  		if (simple.isNullExpr) log_abort();
+  		const auto& simple = expr.as<ast::SimpleAssertionExpr>();
+  		if (simple.isNullExpr) {
+  			return RTLIL::SigSpec(false);
+  		}
   		if (simple.repetition.has_value()) log_abort();
-  		return (*this)(simple.expr);
+  		const auto* old = this->clk;
+  		this->clk = clk;
+  		auto res = (*this)(simple.expr);
+  		this->clk = old;
+  		return res;
 	  }
   case ast::AssertionExprKind::SequenceConcat:
-  		log_abort();
+  	{
+  		const auto& sequence = expr.as<ast::SequenceConcatExpr>();
+  		auto rest = RTLIL::SigSpec {};
+  		for (int i = sequence.elements.size() - 1; i >= 0; i--) {
+  			auto self = (*this)(*sequence.elements[i].sequence, clk);
+  			rest = netlist.LogicAnd(rest, self);
+  			rest = delay(rest, sequence.elements[i].delay, clk);
+  		}
+  		return rest;
+  	}
   case ast::AssertionExprKind::SequenceWithMatch:
   		log_abort();
   case ast::AssertionExprKind::Unary:
   		log_abort();
   case ast::AssertionExprKind::Binary:
-  		log_abort();
+		{
+			const auto& biop = expr.as<ast::BinaryAssertionExpr>();
+			RTLIL::SigSpec left = (*this)(biop.left, clk);
+			RTLIL::SigSpec right = (*this)(biop.right, clk);
+
+			// FIXME: This won't work for arbitrary timings
+			switch (biop.op) {
+			case ast::BinaryAssertionOperator::And:
+				return netlist.Biop(ID($and), left, right, false, false, 1);
+			case ast::BinaryAssertionOperator::Or: log_abort();
+			case ast::BinaryAssertionOperator::Intersect: log_abort();
+			case ast::BinaryAssertionOperator::Throughout: log_abort();
+			case ast::BinaryAssertionOperator::Within: log_abort();
+			case ast::BinaryAssertionOperator::Iff: log_abort();
+			case ast::BinaryAssertionOperator::Until: log_abort();
+			case ast::BinaryAssertionOperator::SUntil: log_abort();
+			case ast::BinaryAssertionOperator::UntilWith: log_abort();
+			case ast::BinaryAssertionOperator::SUntilWith: log_abort();
+			case ast::BinaryAssertionOperator::Implies: log_abort();
+			case ast::BinaryAssertionOperator::OverlappedImplication:
+					return netlist.Biop(ID($or), netlist.Not(left), right, false, false, 1);
+			case ast::BinaryAssertionOperator::NonOverlappedImplication: log_abort();
+			case ast::BinaryAssertionOperator::OverlappedFollowedBy: log_abort();
+			case ast::BinaryAssertionOperator::NonOverlappedFollowedBy: log_abort();
+			}
+		}
   case ast::AssertionExprKind::FirstMatch:
   		log_abort();
   case ast::AssertionExprKind::Clocking:
-  		log_abort();
+		{
+			const auto& clocking = expr.as<ast::ClockingAssertionExpr>();
+			RTLIL::SigSpec clk;
+			switch (clocking.clocking.kind) {
+			case ast::TimingControlKind::Invalid: log_abort();
+			case ast::TimingControlKind::Delay: log_abort();
+			case ast::TimingControlKind::SignalEvent:
+				{
+					const auto& event = clocking.clocking.as<ast::SignalEventControl>();
+					if (event.iffCondition) log_abort();
+					clk = (*this)(event.expr);
+					break;
+				}
+			case ast::TimingControlKind::EventList: log_abort();
+			case ast::TimingControlKind::ImplicitEvent: log_abort();
+			case ast::TimingControlKind::RepeatedEvent: log_abort();
+			case ast::TimingControlKind::Delay3: log_abort();
+			case ast::TimingControlKind::OneStepDelay: log_abort();
+			case ast::TimingControlKind::CycleDelay: log_abort();
+			case ast::TimingControlKind::BlockEventList: log_abort();
+			}
+			return (*this)(clocking.expr, &clk);
+		}
   case ast::AssertionExprKind::StrongWeak:
   		log_abort();
   case ast::AssertionExprKind::Abort:
@@ -1442,7 +1533,13 @@ RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr)
   case ast::AssertionExprKind::Case:
   		log_abort();
   case ast::AssertionExprKind::DisableIff:
-  		log_abort();
+		{
+			const auto& disableiff = expr.as<ast::DisableIffAssertionExpr>();
+			return netlist.LogicOr(
+				(*this)(disableiff.condition),
+				(*this)(disableiff.expr, clk)
+			);
+		}
 	}
 }
 
@@ -1804,6 +1901,12 @@ RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
 					|| call.getSubroutineName() == "$write")) {
 				require(expr, procedural != nullptr);
 				StatementVisitor(*procedural).handle_display(call);
+			} else if (call.isSystemCall() && call.getSubroutineName() == "$past") {
+				require(expr, clk != nullptr);
+				require(expr, call.arguments().size() == 1);
+				auto inner = (*this)(*call.arguments()[0]);
+				ret = netlist.canvas->addWire(netlist.new_id(), expr.type->getBitstreamWidth());
+				netlist.canvas->addDff(netlist.new_id(), *clk, inner, ret, true);
 			} else if (call.isSystemCall()) {
 				require(expr, call.getSubroutineName() == "$signed" || call.getSubroutineName() == "$unsigned");
 				require(expr, call.arguments().size() == 1);
@@ -2725,8 +2828,22 @@ public:
 	}
 
 	void handle(const ast::ClockingBlockSymbol& symbol) {
-		if (!netlist.settings.ignore_timing.value_or(false))
-			netlist.add_diag(diag::GenericTimingUnsyn, symbol.location);
+		// FIXME: Actually use this
+		// if (!netlist.settings.ignore_timing.value_or(false))
+		// 	netlist.add_diag(diag::GenericTimingUnsyn, symbol.location);
+		// default_clocking = symbol.getEvent()
+		// switch (symbol.getEvent().kind) {
+  //   case ast::TimingControlKind::Invalid: log_abort();
+  //   case ast::TimingControlKind::Delay: log_abort();
+  //   case ast::TimingControlKind::SignalEvent: log_abort();
+  //   case ast::TimingControlKind::EventList: log_abort();
+  //   case ast::TimingControlKind::ImplicitEvent: log_abort();
+  //   case ast::TimingControlKind::RepeatedEvent: log_abort();
+  //   case ast::TimingControlKind::Delay3: log_abort();
+  //   case ast::TimingControlKind::OneStepDelay: log_abort();
+  //   case ast::TimingControlKind::CycleDelay: log_abort();
+  //   case ast::TimingControlKind::BlockEventList: log_abort();
+		// }
 	}
 
 	void handle(const ast::Type&) {}
