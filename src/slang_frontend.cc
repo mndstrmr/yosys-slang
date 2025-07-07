@@ -1428,14 +1428,22 @@ RTLIL::SigSpec EvalContext::apply_nested_conversion(const ast::Expression &expr,
 	}
 }
 
-RTLIL::SigSpec EvalContext::delay(RTLIL::SigSpec sig, const slang::ast::SequenceRange &seq, const RTLIL::SigSpec* clk)
+RTLIL::SigSpec EvalContext::delay(RTLIL::SigSpec sig, const slang::ast::SequenceRange &seq, const RTLIL::SigSpec* clk, RTLIL::Const init)
 {
 	if (seq.min == 0 && seq.max == 0) return sig;
+	
+	if (seq.min == seq.max) {
+		for (int i = 0; i < seq.min; i++) {
+			auto next = netlist.canvas->addWire(netlist.new_id(), sig.size());
+			next->attributes[ID::init] = init;
+			netlist.canvas->addDff(netlist.new_id(), *clk, sig, next, true);
+			sig = next;
+		}
+		return sig;
+	}
+	
 	log("Delay: %d - %d\n", seq.min, seq.max.has_value() ? seq.max.value() : -1);
 	log_abort();
-	// if (seq.min != seq.max) log_abort();
-
-	// return netlist
 }
 
 RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTLIL::SigSpec* clk)
@@ -1457,16 +1465,19 @@ RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTL
   		return res;
 	  }
   case ast::AssertionExprKind::SequenceConcat:
-  	{
-  		const auto& sequence = expr.as<ast::SequenceConcatExpr>();
-  		auto rest = RTLIL::SigSpec {};
-  		for (int i = sequence.elements.size() - 1; i >= 0; i--) {
-  			auto self = (*this)(*sequence.elements[i].sequence, clk);
-  			rest = netlist.LogicAnd(rest, self);
-  			rest = delay(rest, sequence.elements[i].delay, clk);
-  		}
-  		return rest;
-  	}
+		{
+			const auto& sequence = expr.as<ast::SequenceConcatExpr>();
+			auto rest = RTLIL::SigSpec(true);
+			auto non_existing = RTLIL::SigSpec(false);
+			for (int i = sequence.elements.size() - 1; i >= 0; i--) {
+				rest = delay(rest, sequence.elements[i].delay, clk, true);
+				non_existing = delay(non_existing, sequence.elements[i].delay, clk, true);
+
+				auto self = (*this)(*sequence.elements[i].sequence, clk);
+				rest = netlist.LogicAnd(rest, self);
+			}
+			return netlist.LogicOr(rest, non_existing);
+		}
   case ast::AssertionExprKind::SequenceWithMatch:
   		log_abort();
   case ast::AssertionExprKind::Unary:
@@ -1493,7 +1504,12 @@ RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTL
 			case ast::BinaryAssertionOperator::Implies: log_abort();
 			case ast::BinaryAssertionOperator::OverlappedImplication:
 					return netlist.Biop(ID($or), netlist.Not(left), right, false, false, 1);
-			case ast::BinaryAssertionOperator::NonOverlappedImplication: log_abort();
+			case ast::BinaryAssertionOperator::NonOverlappedImplication:
+				{
+					auto pre_past = netlist.canvas->addWire(netlist.new_id(), left.size());
+					netlist.canvas->addDff(netlist.new_id(), *clk, left, pre_past, true);
+					return netlist.Biop(ID($or), netlist.Not(pre_past), right, false, false, 1);
+				}
 			case ast::BinaryAssertionOperator::OverlappedFollowedBy: log_abort();
 			case ast::BinaryAssertionOperator::NonOverlappedFollowedBy: log_abort();
 			}
@@ -1907,6 +1923,13 @@ RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
 				auto inner = (*this)(*call.arguments()[0]);
 				ret = netlist.canvas->addWire(netlist.new_id(), expr.type->getBitstreamWidth());
 				netlist.canvas->addDff(netlist.new_id(), *clk, inner, ret, true);
+			} else if (call.isSystemCall() && call.getSubroutineName() == "$stable") {
+				require(expr, clk != nullptr);
+				require(expr, call.arguments().size() == 1);
+				auto inner = (*this)(*call.arguments()[0]);
+				auto past = netlist.canvas->addWire(netlist.new_id(), inner.size());
+				netlist.canvas->addDff(netlist.new_id(), *clk, inner, past, true);
+				ret = netlist.Eq(past, inner);
 			} else if (call.isSystemCall()) {
 				require(expr, call.getSubroutineName() == "$signed" || call.getSubroutineName() == "$unsigned");
 				require(expr, call.arguments().size() == 1);

@@ -138,7 +138,7 @@ struct EvalContext {
 	VariableBits streaming_lhs(ast::StreamingConcatenationExpression const &expr);
 	RTLIL::SigSpec streaming(ast::StreamingConcatenationExpression const &expr);
 
-	RTLIL::SigSpec delay(RTLIL::SigSpec sig, ast::SequenceRange const &delay, const RTLIL::SigSpec* clk);
+	RTLIL::SigSpec delay(RTLIL::SigSpec sig, ast::SequenceRange const &delay, const RTLIL::SigSpec* clk, RTLIL::Const init);
 
 	// Evaluates the given symbols/expressions to their value in this context
 	RTLIL::SigSpec operator()(ast::Expression const &expr);
