@@ -1492,7 +1492,8 @@ RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTL
 			switch (biop.op) {
 			case ast::BinaryAssertionOperator::And:
 				return netlist.Biop(ID($and), left, right, false, false, 1);
-			case ast::BinaryAssertionOperator::Or: log_abort();
+			case ast::BinaryAssertionOperator::Or:
+				return netlist.Biop(ID($or), left, right, false, false, 1);
 			case ast::BinaryAssertionOperator::Intersect: log_abort();
 			case ast::BinaryAssertionOperator::Throughout: log_abort();
 			case ast::BinaryAssertionOperator::Within: log_abort();
@@ -1919,10 +1920,15 @@ RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
 				StatementVisitor(*procedural).handle_display(call);
 			} else if (call.isSystemCall() && call.getSubroutineName() == "$past") {
 				require(expr, clk != nullptr);
-				require(expr, call.arguments().size() == 1);
+				uint32_t depth = 1;
+				if (call.arguments().size() == 2) {
+					require(expr, call.arguments()[1]->kind == ast::ExpressionKind::IntegerLiteral);
+					depth = call.arguments()[1]->as<ast::IntegerLiteral>().getValue().as<int>().value();
+				} else {
+					require(expr, call.arguments().size() == 1);
+				}
 				auto inner = (*this)(*call.arguments()[0]);
-				ret = netlist.canvas->addWire(netlist.new_id(), expr.type->getBitstreamWidth());
-				netlist.canvas->addDff(netlist.new_id(), *clk, inner, ret, true);
+				ret = delay(inner, { depth, depth }, clk, RTLIL::Const(RTLIL::State::Sx, expr.type->getBitstreamWidth()));
 			} else if (call.isSystemCall() && call.getSubroutineName() == "$stable") {
 				require(expr, clk != nullptr);
 				require(expr, call.arguments().size() == 1);
