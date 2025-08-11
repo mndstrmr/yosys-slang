@@ -7,6 +7,7 @@
 #pragma once
 #include "slang/ast/EvalContext.h"
 #include "kernel/rtlil.h"
+#include <vector>
 
 // work around yosys PR #4524 changing the way you ask for pointer hashing
 #if YS_HASHING_VERSION <= 0
@@ -120,7 +121,6 @@ private:
 struct EvalContext {
 	NetlistContext &netlist;
 	ProceduralContext *procedural;
-	const RTLIL::SigSpec *clk = nullptr;
 
 	ast::EvalContext const_;
 	const ast::Expression *lvalue = nullptr;
@@ -138,11 +138,9 @@ struct EvalContext {
 	VariableBits streaming_lhs(ast::StreamingConcatenationExpression const &expr);
 	RTLIL::SigSpec streaming(ast::StreamingConcatenationExpression const &expr);
 
-	RTLIL::SigSpec delay(RTLIL::SigSpec sig, ast::SequenceRange const &delay, const RTLIL::SigSpec* clk, RTLIL::Const init);
-
 	// Evaluates the given symbols/expressions to their value in this context
 	RTLIL::SigSpec operator()(ast::Expression const &expr);
-	RTLIL::SigSpec operator()(ast::AssertionExpr const &expr, const RTLIL::SigSpec* clk);
+	RTLIL::SigSpec operator()(ast::AssertionExpr const &expr);
 	RTLIL::SigSpec operator()(ast::Symbol const &symbol);
 
 	// Evaluates the given expression, inserts an extra sign bit if need

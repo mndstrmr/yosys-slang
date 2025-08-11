@@ -4,6 +4,7 @@
 // Copyright 2024 Martin Povišer <povik@cutebit.org>
 // Distributed under the terms of the ISC license, see LICENSE
 //
+#include "kernel/log.h"
 #include "slang/ast/ASTVisitor.h"
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
@@ -26,6 +27,7 @@
 #include "kernel/sigtools.h"
 #include "kernel/utils.h"
 
+#include "formal.h"
 #include "version.h"
 #include "initial_eval.h"
 #include "slang_frontend.h"
@@ -490,7 +492,6 @@ public:
 	EvalContext &eval;
 	UnrollLimitTracking &unroll_limit;
 	const ast::Symbol *scope_symbol;
-	const RTLIL::SigSpec *default_clocking = nullptr;
 
 	StatementVisitor(ProceduralContext &context)
 		: netlist(context.netlist), context(context), eval(context.eval), unroll_limit(context.unroll_limit) {}
@@ -648,7 +649,7 @@ public:
 		if (netlist.settings.ignore_assertions.value_or(false))
 			return;
 
-		auto cell = handle_check(stmt, eval(stmt.propertySpec, default_clocking));
+		auto cell = handle_check(stmt, eval(stmt.propertySpec));
 		if (stmt.propertySpec.kind == ast::AssertionExprKind::Clocking) {
 			const auto& clocking = stmt.propertySpec.as<ast::ClockingAssertionExpr>();
 			if (clocking.clocking.kind == ast::TimingControlKind::SignalEvent) {
@@ -1428,136 +1429,10 @@ RTLIL::SigSpec EvalContext::apply_nested_conversion(const ast::Expression &expr,
 	}
 }
 
-RTLIL::SigSpec EvalContext::delay(RTLIL::SigSpec sig, const slang::ast::SequenceRange &seq, const RTLIL::SigSpec* clk, RTLIL::Const init)
+
+RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr)
 {
-	if (seq.min == 0 && seq.max == 0) return sig;
-	
-	if (seq.min == seq.max) {
-		for (int i = 0; i < seq.min; i++) {
-			auto next = netlist.canvas->addWire(netlist.new_id(), sig.size());
-			next->attributes[ID::init] = init;
-			netlist.canvas->addDff(netlist.new_id(), *clk, sig, next, true);
-			sig = next;
-		}
-		return sig;
-	}
-	
-	log("Delay: %d - %d\n", seq.min, seq.max.has_value() ? seq.max.value() : -1);
-	log_abort();
-}
-
-RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr, const RTLIL::SigSpec* clk)
-{
-	switch (expr.kind) {
-  case ast::AssertionExprKind::Invalid:
-  		log_abort();
-  case ast::AssertionExprKind::Simple:
-	  {
-  		const auto& simple = expr.as<ast::SimpleAssertionExpr>();
-  		if (simple.isNullExpr) {
-  			return RTLIL::SigSpec(false);
-  		}
-  		if (simple.repetition.has_value()) log_abort();
-  		const auto* old = this->clk;
-  		this->clk = clk;
-  		auto res = (*this)(simple.expr);
-  		this->clk = old;
-  		return res;
-	  }
-  case ast::AssertionExprKind::SequenceConcat:
-		{
-			const auto& sequence = expr.as<ast::SequenceConcatExpr>();
-			auto rest = RTLIL::SigSpec(true);
-			auto non_existing = RTLIL::SigSpec(false);
-			for (int i = sequence.elements.size() - 1; i >= 0; i--) {
-				rest = delay(rest, sequence.elements[i].delay, clk, true);
-				non_existing = delay(non_existing, sequence.elements[i].delay, clk, true);
-
-				auto self = (*this)(*sequence.elements[i].sequence, clk);
-				rest = netlist.LogicAnd(rest, self);
-			}
-			return netlist.LogicOr(rest, non_existing);
-		}
-  case ast::AssertionExprKind::SequenceWithMatch:
-  		log_abort();
-  case ast::AssertionExprKind::Unary:
-  		log_abort();
-  case ast::AssertionExprKind::Binary:
-		{
-			const auto& biop = expr.as<ast::BinaryAssertionExpr>();
-			RTLIL::SigSpec left = (*this)(biop.left, clk);
-			RTLIL::SigSpec right = (*this)(biop.right, clk);
-
-			// FIXME: This won't work for arbitrary timings
-			switch (biop.op) {
-			case ast::BinaryAssertionOperator::And:
-				return netlist.Biop(ID($and), left, right, false, false, 1);
-			case ast::BinaryAssertionOperator::Or:
-				return netlist.Biop(ID($or), left, right, false, false, 1);
-			case ast::BinaryAssertionOperator::Intersect: log_abort();
-			case ast::BinaryAssertionOperator::Throughout: log_abort();
-			case ast::BinaryAssertionOperator::Within: log_abort();
-			case ast::BinaryAssertionOperator::Iff: log_abort();
-			case ast::BinaryAssertionOperator::Until: log_abort();
-			case ast::BinaryAssertionOperator::SUntil: log_abort();
-			case ast::BinaryAssertionOperator::UntilWith: log_abort();
-			case ast::BinaryAssertionOperator::SUntilWith: log_abort();
-			case ast::BinaryAssertionOperator::Implies: log_abort();
-			case ast::BinaryAssertionOperator::OverlappedImplication:
-					return netlist.Biop(ID($or), netlist.Not(left), right, false, false, 1);
-			case ast::BinaryAssertionOperator::NonOverlappedImplication:
-				{
-					auto pre_past = netlist.canvas->addWire(netlist.new_id(), left.size());
-					netlist.canvas->addDff(netlist.new_id(), *clk, left, pre_past, true);
-					return netlist.Biop(ID($or), netlist.Not(pre_past), right, false, false, 1);
-				}
-			case ast::BinaryAssertionOperator::OverlappedFollowedBy: log_abort();
-			case ast::BinaryAssertionOperator::NonOverlappedFollowedBy: log_abort();
-			}
-		}
-  case ast::AssertionExprKind::FirstMatch:
-  		log_abort();
-  case ast::AssertionExprKind::Clocking:
-		{
-			const auto& clocking = expr.as<ast::ClockingAssertionExpr>();
-			RTLIL::SigSpec clk;
-			switch (clocking.clocking.kind) {
-			case ast::TimingControlKind::Invalid: log_abort();
-			case ast::TimingControlKind::Delay: log_abort();
-			case ast::TimingControlKind::SignalEvent:
-				{
-					const auto& event = clocking.clocking.as<ast::SignalEventControl>();
-					if (event.iffCondition) log_abort();
-					clk = (*this)(event.expr);
-					break;
-				}
-			case ast::TimingControlKind::EventList: log_abort();
-			case ast::TimingControlKind::ImplicitEvent: log_abort();
-			case ast::TimingControlKind::RepeatedEvent: log_abort();
-			case ast::TimingControlKind::Delay3: log_abort();
-			case ast::TimingControlKind::OneStepDelay: log_abort();
-			case ast::TimingControlKind::CycleDelay: log_abort();
-			case ast::TimingControlKind::BlockEventList: log_abort();
-			}
-			return (*this)(clocking.expr, &clk);
-		}
-  case ast::AssertionExprKind::StrongWeak:
-  		log_abort();
-  case ast::AssertionExprKind::Abort:
-  		log_abort();
-  case ast::AssertionExprKind::Conditional:
-  		log_abort();
-  case ast::AssertionExprKind::Case:
-  		log_abort();
-  case ast::AssertionExprKind::DisableIff:
-		{
-			const auto& disableiff = expr.as<ast::DisableIffAssertionExpr>();
-			return netlist.LogicOr(
-				(*this)(disableiff.condition),
-				(*this)(disableiff.expr, clk)
-			);
-		}
-	}
+	return evalAssertion(*this, expr);
 }
 
 RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
@@ -1919,7 +1794,6 @@ RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
 				require(expr, procedural != nullptr);
 				StatementVisitor(*procedural).handle_display(call);
 			} else if (call.isSystemCall() && call.getSubroutineName() == "$past") {
-				require(expr, clk != nullptr);
 				uint32_t depth = 1;
 				if (call.arguments().size() == 2) {
 					require(expr, call.arguments()[1]->kind == ast::ExpressionKind::IntegerLiteral);
@@ -1928,14 +1802,19 @@ RTLIL::SigSpec EvalContext::operator()(ast::Expression const &expr)
 					require(expr, call.arguments().size() == 1);
 				}
 				auto inner = (*this)(*call.arguments()[0]);
-				ret = delay(inner, { depth, depth }, clk, RTLIL::Const(RTLIL::State::Sx, expr.type->getBitstreamWidth()));
+				ret = past(*this, inner, depth, RTLIL::Const(RTLIL::State::Sx, expr.type->getBitstreamWidth()));
 			} else if (call.isSystemCall() && call.getSubroutineName() == "$stable") {
-				require(expr, clk != nullptr);
 				require(expr, call.arguments().size() == 1);
 				auto inner = (*this)(*call.arguments()[0]);
 				auto past = netlist.canvas->addWire(netlist.new_id(), inner.size());
-				netlist.canvas->addDff(netlist.new_id(), *clk, inner, past, true);
+				netlist.canvas->addFf(netlist.new_id(), inner, past);
 				ret = netlist.Eq(past, inner);
+			} else if (call.isSystemCall() && call.getSubroutineName() == "$rose") {
+				require(expr, call.arguments().size() == 1);
+				auto inner = (*this)(*call.arguments()[0]);
+				auto past = netlist.canvas->addWire(netlist.new_id(), inner.size());
+				netlist.canvas->addFf(netlist.new_id(), inner, past);
+				ret = netlist.LogicAnd(netlist.LogicNot(past), inner);
 			} else if (call.isSystemCall()) {
 				require(expr, call.getSubroutineName() == "$signed" || call.getSubroutineName() == "$unsigned");
 				require(expr, call.arguments().size() == 1);
@@ -2860,19 +2739,6 @@ public:
 		// FIXME: Actually use this
 		// if (!netlist.settings.ignore_timing.value_or(false))
 		// 	netlist.add_diag(diag::GenericTimingUnsyn, symbol.location);
-		// default_clocking = symbol.getEvent()
-		// switch (symbol.getEvent().kind) {
-  //   case ast::TimingControlKind::Invalid: log_abort();
-  //   case ast::TimingControlKind::Delay: log_abort();
-  //   case ast::TimingControlKind::SignalEvent: log_abort();
-  //   case ast::TimingControlKind::EventList: log_abort();
-  //   case ast::TimingControlKind::ImplicitEvent: log_abort();
-  //   case ast::TimingControlKind::RepeatedEvent: log_abort();
-  //   case ast::TimingControlKind::Delay3: log_abort();
-  //   case ast::TimingControlKind::OneStepDelay: log_abort();
-  //   case ast::TimingControlKind::CycleDelay: log_abort();
-  //   case ast::TimingControlKind::BlockEventList: log_abort();
-		// }
 	}
 
 	void handle(const ast::Type&) {}
