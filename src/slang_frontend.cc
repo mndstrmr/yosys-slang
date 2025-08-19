@@ -9,7 +9,6 @@
 #include "slang/ast/Compilation.h"
 #include "slang/ast/EvalContext.h"
 #include "slang/ast/SystemSubroutine.h"
-#include "slang/diagnostics/CompilationDiags.h"
 #include "slang/diagnostics/DiagnosticEngine.h"
 #include "slang/diagnostics/LookupDiags.h"
 #include "slang/driver/Driver.h"
@@ -72,7 +71,6 @@ void SynthesisSettings::addOptions(slang::CommandLine &cmdLine) {
 
 namespace ast = slang::ast;
 namespace syntax = slang::syntax;
-namespace parsing = slang::parsing;
 
 ast::Compilation *global_compilation;
 const slang::SourceManager *global_sourcemgr;
@@ -681,14 +679,14 @@ public:
 			log_abort();
 		}
 
-		
+
 		std::string name;
 		if (scope_symbol) {
 			name = "\\";
 			name = netlist.new_id(name + scope_symbol->getHierarchicalPath());
 		} else
 			name = netlist.new_id();
-		
+
 		auto cell = netlist.canvas->addCell(name, ID($check));
 		cell->setParam(ID::FLAVOR, flavor);
 		cell->setParam(ID::FORMAT, std::string(""));
@@ -1429,7 +1427,6 @@ RTLIL::SigSpec EvalContext::apply_nested_conversion(const ast::Expression &expr,
 	}
 }
 
-
 RTLIL::SigSpec EvalContext::operator()(ast::AssertionExpr const &expr)
 {
 	return evalAssertion(*this, expr);
@@ -2021,7 +2018,7 @@ public:
 			for (auto chunk : latch_driven.chunks()) {
 				RTLIL::SigSpec en = netlist.canvas->addWire(netlist.new_id(), chunk.bitwidth());
 				RTLIL::SigSpec staging = netlist.canvas->addWire(netlist.new_id(), chunk.bitwidth());
-				
+
 				for (int i = 0; i < chunk.bitwidth(); i++) {
 					RTLIL::Cell *cell = netlist.canvas->addDlatch(netlist.new_id(), en[i],
 											staging[i], netlist.convert_static(chunk[i]), true);

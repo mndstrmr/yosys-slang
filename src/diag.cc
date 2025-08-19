@@ -162,7 +162,7 @@ namespace diag {
 		engine.setMessage(NonconstWildcardEq, "wildcard equality unsynthesizable with non-constant right-hand operand");
 		engine.setSeverity(NonconstWildcardEq, DiagnosticSeverity::Error);
 
-		engine.setMessage(AssertionUnsupported, "unsupported assertion statement");
+		engine.setMessage(AssertionUnsupported, "unsupported assertion sub-expression. Only the following are supported: disable iff, and, or, not, ##a, ##[a:b], |->, and |=>.");
 		engine.setSeverity(AssertionUnsupported, DiagnosticSeverity::Error);
 
 		engine.setMessage(LangFeatureUnsupported, "unsupported language feature");
