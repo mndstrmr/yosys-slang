@@ -187,6 +187,7 @@ static std::vector<AssertionMatch> synthesizeAssertionExpr(EvalContext& eval, co
 					If the operands te1 and te2 are expressions, then te1 or te2 matches at any clock tick on which at least
 					one of te1 and te2 evaluates to true.
 					*/
+					if (left.empty() || right.empty()) return {}; // Propogate errors
 					left.insert(left.end(), right.begin(), right.end());
 					return left;
 				}
@@ -252,17 +253,13 @@ static std::vector<AssertionMatch> synthesizeAssertionExpr(EvalContext& eval, co
 	log_abort(); // Unreachable
 };
 
-AssertionMatch synthesizeAll(EvalContext& eval, std::vector<AssertionMatch>& paths) {
-	auto sig = paths[0];
-	for (size_t i = 1; i < paths.size(); i++) sig = sig || paths[i];
-	return sig;
-}
-
 RTLIL::SigSpec evalAssertion(EvalContext& eval, const ast::AssertionExpr& assertion) {
 	auto paths = synthesizeAssertionExpr(eval, assertion);
 	if (paths.empty()) return false; // Ran into an error
 
-	auto sig = synthesizeAll(eval, paths);
+	auto sig = paths[0];
+	for (size_t i = 1; i < paths.size(); i++) sig = sig || paths[i];
+
 	auto init_escape = past(eval, false, sig.start, true);
 	// Checks are disabled until all(?) paths are in the frame
 	return eval.netlist.LogicOr(sig.sig, init_escape);
