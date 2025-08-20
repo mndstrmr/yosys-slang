@@ -647,11 +647,12 @@ public:
 		if (netlist.settings.ignore_assertions.value_or(false))
 			return;
 
-		auto cell = handle_check(stmt, eval(stmt.propertySpec));
 		if (stmt.propertySpec.kind == ast::AssertionExprKind::Clocking) {
 			const auto& clocking = stmt.propertySpec.as<ast::ClockingAssertionExpr>();
 			if (clocking.clocking.kind == ast::TimingControlKind::SignalEvent) {
 				const auto& event = clocking.clocking.as<ast::SignalEventControl>();
+
+				auto cell = handle_check(stmt, eval(stmt.propertySpec));
 				cell->setParam(ID::TRG_ENABLE, 1);
 				cell->setParam(ID::TRG_WIDTH, 1);
 				cell->setParam(ID::TRG_POLARITY, RTLIL::Const(1, 1));
@@ -660,6 +661,35 @@ public:
 				return;
 			}
 		}
+
+		// For unclocked properties, we'll generate unclocked asserts.
+		RTLIL::IdString flavor;
+		switch (stmt.assertionKind) {
+		case ast::AssertionKind::Assert:
+			flavor = ID($assert);
+			break;
+		case ast::AssertionKind::Assume:
+			flavor = ID($assume);
+			break;
+		case ast::AssertionKind::CoverProperty:
+			flavor = ID($cover);
+			break;
+		default:
+			log_abort();
+		}
+
+		std::string name;
+		if (scope_symbol) {
+			name = "\\";
+			name = netlist.new_id(name + scope_symbol->getHierarchicalPath());
+		} else
+			name = netlist.new_id();
+
+		auto cell = netlist.canvas->addCell(name, flavor);
+		cell->setPort(ID::A, netlist.ReduceBool(eval(stmt.propertySpec)));
+		cell->setPort(ID::EN, RTLIL::SigSpec(true, 1));
+		transfer_attrs(stmt, cell);
+		return;
 	}
 
 	template<typename T>
